@@ -23,7 +23,8 @@ pitching_2023.txt ... 2026     Baseball-Reference player exports
 bbref_2026_teams.csv           2026 club pitching and standings
 salaries_2026.csv / .xlsx      Spotrac contracts
 repr_params_full.csv           fitted salary-quality gradients (also written by 04)
-bare_figs.py                   produced the published matplotlib figures
+bare_figs.py                   produced the published matplotlib figures;
+                               solves F* from the data rather than hardcoding it
 ```
 
 ## Rebuilding the abstract
