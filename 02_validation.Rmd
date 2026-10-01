@@ -1,0 +1,112 @@
+---
+title: "02 -- Validation: attribution, persistence, and the map itself"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+DATA <- "../data"
+GAMMA <- 1.83; UR <- 0.31
+wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
+ip_true <- function(x) { w <- floor(x + 1e-9); w + round((x - w) * 10) / 3 }
+seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
+stints  <- read_csv(file.path(DATA, "pitcher_stints_full.csv"),  show_col_types = FALSE)
+```
+
+## A. Attribution: which inputs own the variation in winning?
+
+Regressing club wins on staff pitching alone omits the offense, which is 38--42 % of win
+variance. That misspecification also flatters ERA, because ERA absorbs fielding and
+sequencing. We therefore recover each club's offense by inverting the Pythagorean identity
+and decompose run prevention into channels that are actually distinct.
+
+```{r teamprep}
+tm <- read_csv(file.path(DATA, "bbref_2026_teams.csv"), show_col_types = FALSE) %>%
+  mutate(IP = ip_true(IP_raw), G_opp = IP / 9, games = W + L, wpct = W / games,
+         RS_G = RA_G * (wpct / (1 - wpct))^(1 / GAMMA))
+
+agg <- stints %>% filter(season == 2026) %>%
+  group_by(team) %>%
+  summarise(across(c(IP, H, R, ER, HR, BB, SO, HBP, BF), sum), .groups = "drop")
+
+m <- tm %>% select(team, W, games, RS_G, RA_G, G_opp) %>% left_join(agg, by = "team") %>%
+  mutate(bip   = BF - SO - BB - HBP - HR,
+         BABIP = (H - HR) / bip,                                   # fielding + fortune
+         LOB   = (H + BB + HBP - R) / (H + BB + HBP - 1.4 * HR),   # sequencing
+         UER9  = 9 * (R - ER) / IP)                                # fielding errors
+```
+
+```{r fipw}
+# staff FIP_Pyth_WL wins, scaled to the club's games played
+staff_fip <- stints %>% filter(season == 2026) %>%
+  group_by(team) %>% summarise(fipw_raw = sum(fip_W), .groups = "drop")
+m <- m %>% left_join(staff_fip, by = "team") %>%
+  mutate(fipw = fipw_raw * games / G_opp)
+```
+
+### The five-input decomposition
+
+```{r decomp}
+fit <- lm(W ~ fipw + BABIP + LOB + UER9 + RS_G, data = m)
+share <- function(x, y, b) b * cov(x, y) / var(y)
+b <- coef(fit)
+tibble(component = c("fielding-independent pitching", "balls in play (BABIP)",
+                     "sequencing (strand rate)", "fielding errors", "offense"),
+       share = c(share(m$fipw, m$W, b[2]), share(m$BABIP, m$W, b[3]),
+                 share(m$LOB,  m$W, b[4]), share(m$UER9, m$W, b[5]),
+                 share(m$RS_G, m$W, b[6]))) %>%
+  mutate(pct = 100 * share) %>% select(-share) %>% knitr::kable(digits = 1)
+cat(sprintf("R-squared %.3f; residual %.1f%%\n", summary(fit)$r.squared,
+            100 * (1 - summary(fit)$r.squared)))
+```
+
+Sequencing, not fielding, is what a run average mostly mistakes for pitching. Errors are
+almost nothing. Pitching proper exceeds fielding even charging every ball in play to the
+fielders.
+
+## B. Persistence, at the level that matters
+
+This must be run on **individual pitchers**. A club-level version is confounded twice
+over: rosters turn over, and a whole staff's fielding averages out in a way that flatters
+ERA rather than testing it. Run the club version and sequencing appears *more* persistent
+than pitching, which is an artifact of aggregation.
+
+```{r persist}
+pairs <- list(c(2023, 2024), c(2024, 2025), c(2025, 2026))
+panel <- map_dfr(pairs, function(p) {
+  a <- seasons %>% filter(season == p[1]) %>% select(pid, IP, fip_rate, era_rate, wedge_rate)
+  b <- seasons %>% filter(season == p[2]) %>% select(pid, IP2 = IP, f2 = fip_rate,
+                                                     e2 = era_rate, w2 = wedge_rate)
+  inner_join(a, b, by = "pid") %>% mutate(pair = paste0(p[1], "-", p[2]))
+})
+
+map_dfr(c(10, 20, 30, 40, 50, 70, 100), function(thr) {
+  s <- panel %>% filter(IP >= thr, IP2 >= thr)
+  tibble(min_IP = thr, n = nrow(s),
+         FIP_rate = cor(s$fip_rate, s$f2),
+         ERA_rate = cor(s$era_rate, s$e2),
+         wedge    = cor(s$wedge_rate, s$w2))
+}) %>% mutate(gap = FIP_rate - ERA_rate) %>% knitr::kable(digits = 3)
+```
+
+The FIP-anchored rate repeats about twice as strongly as the ERA-anchored one at every
+bar, and the wedge -- exactly what ERA carries and this measure excludes -- barely repeats.
+
+## C. Is the Pythagorean map itself right?
+
+The form and exponent were calibrated on *team* runs. We test them on individual pitchers
+using the official won-lost record, which is noisy but close to orthogonal to a pitcher's
+own FIP, so its conditional mean given FIP traces the underlying map.
+
+```{r map}
+st <- seasons %>% filter(GS / pmax(G, 1) >= 0.80, (W + L) >= 10) %>%
+  mutate(awpct = W / (W + L))
+curve_fn <- function(fip, gamma, ref) { num <- (ref + UR)^gamma; num / (num + (fip + UR)^gamma) }
+fit_map <- nls(awpct ~ curve_fn(FIP, gamma, ref), data = st,
+               start = list(gamma = 1.83, ref = 4.1), weights = (W + L))
+summary(fit_map)$coefficients %>% knitr::kable(digits = 3)
+```
+
+If `gamma` is statistically indistinguishable from 1.83, the functional form inherited
+from team run-scoring survives a test it had not previously been given.

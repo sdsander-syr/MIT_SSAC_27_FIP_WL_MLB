@@ -1,0 +1,120 @@
+---
+title: "03 -- Machine learning and uncertainty"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse); library(glmnet); library(ranger); library(gbm)
+DATA <- "../data"; set.seed(20260901)
+seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
+MINIP <- 40
+```
+
+## Building the supervised-learning panel
+
+The target is next season's `FIP_Pyth_WinRate`. The thirteen inputs deliberately include
+the ERA-anchored rate, so the learner is free to prefer it over ours.
+
+```{r panel}
+feat <- function(d) d %>%
+  mutate(K9 = 9 * SO / IP, BB9 = 9 * BB / IP, HR9 = 9 * HR / IP, Hit9 = 9 * H / IP,
+         KBB = SO / pmax(BB, 1), GS_share = GS / pmax(G, 1), SV_rate = SV / pmax(G, 1),
+         BABIP = (H - HR) / pmax(BF - SO - BB - HBP - HR, 1), Workload = IP)
+
+FEATS <- c("fip_rate","era_rate","K9","BB9","HR9","Hit9","KBB","WHIP",
+           "BABIP","Workload","Age","GS_share","SV_rate")
+
+make_pair <- function(y1, y2, split) {
+  a <- feat(seasons %>% filter(season == y1))
+  b <- seasons %>% filter(season == y2) %>% select(pid, y = fip_rate)
+  inner_join(a, b, by = "pid") %>% filter(IP >= MINIP) %>% mutate(split = split)
+}
+d  <- bind_rows(make_pair(2023, 2024, "train"),
+                make_pair(2024, 2025, "calib"),
+                make_pair(2025, 2026, "test")) %>% drop_na(all_of(c(FEATS, "y")))
+tr <- d %>% filter(split == "train"); ca <- d %>% filter(split == "calib")
+te <- d %>% filter(split == "test")
+cat(sprintf("train %d | calibrate %d | test %d\n", nrow(tr), nrow(ca), nrow(te)))
+```
+
+Training uses 2023-24 and 2024-25; 2025-26 is held out entirely, with no season shared.
+
+## Baselines and three learners
+
+```{r models}
+trf <- bind_rows(tr, ca)
+Xtr <- as.matrix(trf[FEATS]); Xte <- as.matrix(te[FEATS])
+
+r2 <- function(p, y) 1 - sum((y - p)^2) / sum((y - mean(y))^2)
+res <- tibble()
+
+res <- bind_rows(res, tibble(model = "Unconditional mean",
+  R2 = r2(rep(mean(trf$y), nrow(te)), te$y)))
+for (v in c("fip_rate", "era_rate")) {
+  f <- lm(reformulate(v, "y"), data = trf)
+  res <- bind_rows(res, tibble(model = paste0("AR(1) on ", v),
+                               R2 = r2(predict(f, te), te$y)))
+}
+
+ridge <- cv.glmnet(Xtr, trf$y, alpha = 0)
+res <- bind_rows(res, tibble(model = "Ridge (all 13)",
+  R2 = r2(as.numeric(predict(ridge, Xte, s = "lambda.min")), te$y)))
+
+rf <- ranger(y ~ ., data = trf[c(FEATS, "y")], num.trees = 600,
+             min.node.size = 5, mtry = 6, importance = "permutation")
+res <- bind_rows(res, tibble(model = "Random forest",
+  R2 = r2(predict(rf, te)$predictions, te$y)))
+
+gb <- gbm(y ~ ., data = trf[c(FEATS, "y")], distribution = "gaussian",
+          n.trees = 400, shrinkage = 0.03, interaction.depth = 3,
+          bag.fraction = 0.8, verbose = FALSE)
+res <- bind_rows(res, tibble(model = "Gradient boosting",
+  R2 = r2(predict(gb, te, n.trees = 400), te$y)))
+knitr::kable(res, digits = 3)
+```
+
+## Permutation importance on the held-out set
+
+This is the decisive quantity: what a *fitted* model leans on out of sample, not what it
+split on during training.
+
+```{r perm}
+base <- r2(predict(gb, te, n.trees = 400), te$y)
+imp <- map_dfr(FEATS, function(f) {
+  drops <- replicate(40, {
+    sh <- te; sh[[f]] <- sample(sh[[f]])
+    base - r2(predict(gb, sh, n.trees = 400), te$y)
+  })
+  tibble(feature = f, importance = mean(drops), sd = sd(drops))
+}) %>% arrange(desc(importance))
+knitr::kable(imp, digits = 4)
+```
+
+If `fip_rate` ranks first of thirteen and several times above `era_rate`, the learner has
+chosen the fielding-independent rate while free to choose otherwise.
+
+## Conformal prediction intervals
+
+Quantile boosting alone under-covers out of sample. The correction must be calibrated on
+a *held-out transition*, not a random slice of the training years, because the shortfall
+comes from year-to-year drift a within-year slice cannot see.
+
+```{r conformal}
+qfit <- function(a) gbm(y ~ ., data = tr[c(FEATS, "y")], distribution = list(name = "quantile", alpha = a),
+                        n.trees = 400, shrinkage = 0.03, interaction.depth = 3,
+                        bag.fraction = 0.8, verbose = FALSE)
+q10 <- qfit(0.10); q50 <- qfit(0.50); q90 <- qfit(0.90)
+pr <- function(m, nd) predict(m, nd, n.trees = 400)
+
+cl <- pr(q10, ca); cm <- pr(q50, ca); ch <- pr(q90, ca)
+cover <- function(s) mean(ca$y >= cm - s * (cm - cl) & ca$y <= cm + s * (ch - cm))
+grid <- seq(0.5, 4, length.out = 400)
+SCALE <- grid[which.min(abs(sapply(grid, cover) - 0.80))]
+
+tl <- pr(q10, te); tm <- pr(q50, te); th <- pr(q90, te)
+lo <- tm - SCALE * (tm - tl); hi <- tm + SCALE * (th - tm)
+cat(sprintf("conformal scale %.2f | realised coverage of the nominal 80%% band: %.1f%%\n",
+            SCALE, 100 * mean(te$y >= lo & te$y <= hi)))
+cat(sprintf("median 80%% width %.4f of win rate\n", median(hi - lo)))
+```

@@ -1,0 +1,175 @@
+---
+title: "04 -- Payroll: win-flip pricing, role x service class, reallocation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse); library(readxl)
+DATA <- "../data"; set.seed(20260901)
+GAMMA <- 1.83; UR <- 0.31; MIN_SAL <- 0.78
+wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
+seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
+stints  <- read_csv(file.path(DATA, "pitcher_stints_full.csv"),  show_col_types = FALSE)
+SAL   <- c(Starter = 6.80, Relief = 1.60, Closer = 8.00)   # 2026 role averages
+SLOTS <- c(Starter = 5,    Relief = 7,    Closer = 1)
+SF    <- 138 / 162                                          # 2026 is through 138 games
+```
+
+## Individual contracts
+
+`salaries_2026.csv` is the parsed Spotrac table: 819 pitchers with team, Spotrac's own
+role tag, and 2026 salary. Roles come from the market's labels, not from our save rule.
+
+```{r salaries}
+sal <- read_csv(file.path(DATA, "salaries_2026.csv"), show_col_types = FALSE) %>%
+  mutate(salM = salary / 1e6,
+         role = case_when(str_detect(role_raw, "CL")  ~ "Closer",
+                          str_starts(role_raw, "SP")  ~ "Starter",
+                          TRUE                        ~ "Relief"))
+
+norm <- function(x) x %>% iconv(to = "ASCII//TRANSLIT") %>% str_remove_all("[.']") %>%
+  str_squish() %>% str_to_lower()
+
+perf <- stints %>% filter(season == 2026) %>%
+  mutate(key = norm(name), ip162 = IP / SF) %>%
+  group_by(key) %>%
+  summarise(IP = sum(IP), ip162 = sum(ip162), FIP = mean(FIP), .groups = "drop")
+
+m <- sal %>% mutate(key = norm(name)) %>% inner_join(perf, by = "key")
+cat(sprintf("matched %d of %d contracts, %.0f%% of 2026 innings\n",
+            nrow(m), nrow(sal), 100 * sum(m$IP) / sum(stints$IP[stints$season == 2026])))
+
+m %>% group_by(role) %>%
+  summarise(n = n(), median = median(salM), mean = mean(salM), .groups = "drop") %>%
+  knitr::kable(digits = 2)
+```
+
+## The closer premium, observed rather than modelled
+
+```{r closer}
+FSTAR26 <- seasons %>% filter(season == 2026) %>% pull(FSTAR) %>% first()
+m <- m %>% mutate(wrate = wp(FIP, FSTAR26))
+m %>% filter(ip162 >= 20, role %in% c("Relief", "Closer")) %>%
+  group_by(role) %>%
+  summarise(n = n(), median_sal = median(salM), IP = mean(ip162),
+            win_rate = weighted.mean(wrate, ip162), .groups = "drop") %>%
+  knitr::kable(digits = 3)
+```
+
+Closers earn several times what other relievers earn, on *fewer* innings. Dividing the
+salary gap by the win gap over a closer's opportunities gives the cost per marginal win.
+
+## Role crossed with service class
+
+The within-role salary-quality gradient looks flat until age is controlled, because the
+collective bargaining agreement prices service time rather than performance: elite
+pre-arbitration arms sit at the minimum beside declining veterans on long deals.
+
+```{r rolexclass}
+age <- seasons %>% filter(season == 2026) %>% mutate(key = norm(name)) %>%
+  select(key, Age) %>% distinct(key, .keep_all = TRUE)
+
+mc <- m %>% left_join(age, by = "key") %>% filter(!is.na(Age)) %>%
+  mutate(cls = cut(Age, c(0, 26, 30, 99),
+                   labels = c("26 and under", "27-30", "31 and over")),
+         G_slot = ip162 / 9,
+         q = G_slot * wrate) %>%
+  filter(ip162 >= if_else(role == "Starter", 60, 20))
+
+mc %>% group_by(role, cls) %>% filter(n() >= 5) %>%
+  summarise(n = n(), median_sal = median(salM),
+            win_rate = weighted.mean(wrate, ip162),
+            fipw = weighted.mean(q, ip162), .groups = "drop") %>%
+  mutate(M_per_win = median_sal / fipw) %>%
+  arrange(M_per_win) %>% knitr::kable(digits = 2)
+```
+
+Read the ranking, not just the levels. Class dominates role, and the role effect
+*reverses*: among minimum-salary arms the starter is the better buy because opportunity is
+free and he has more of it; among free agents the reliever is, because the market charges
+too much for rotation innings.
+
+## The representative club and the reallocation
+
+Built from what clubs actually do: innings by role summed within each of the 30 staffs,
+prorated to a full season, averaged. The anchor is then solved so the league-average
+allocation goes exactly 81-81, which makes every later record a 162-game record.
+
+```{r club}
+club <- stints %>% filter(season == 2026) %>%
+  mutate(ip162 = IP / SF) %>%
+  group_by(team, role) %>% summarise(ip = sum(ip162), .groups = "drop") %>%
+  group_by(role) %>% summarise(IP = mean(ip), .groups = "drop") %>%
+  mutate(IP = IP * 1458 / sum(IP))                       # close to exactly 162 opportunities
+
+Gs  <- setNames(club$IP / 9 / SLOTS[club$role], club$role)
+FIProle <- stints %>% filter(season == 2026) %>% group_by(role) %>%
+  summarise(FIP = weighted.mean(FIP, IP), .groups = "drop")
+FIPr <- setNames(FIProle$FIP, FIProle$role)
+
+staff_wins <- function(ref) sum(SLOTS * Gs[names(SLOTS)] * wp(FIPr[names(SLOTS)], ref))
+FT <- uniroot(function(r) staff_wins(r) - 81, c(0.5, 15), tol = 1e-12)$root
+cat(sprintf("F*_team = %.4f, staff wins %.2f\n", FT, staff_wins(FT)))
+```
+
+```{r gradients}
+MINIP <- c(Starter = 80, Relief = 25, Closer = 25)
+PAR <- map_dfr(names(SLOTS), function(r) {
+  s <- stints %>% filter(season == 2026, role == r, IP / SF >= MINIP[[r]])
+  q <- Gs[[r]] * wp(s$FIP, FT)
+  wavg <- Gs[[r]] * wp(FIPr[[r]], FT)                 # pins the curve to the 81-81 club
+  wmin <- min(quantile(q, .10), wavg - 0.05)
+  wmax <- max(quantile(q, .98), wavg + 0.05)
+  tibble(role = r, w_min = wmin, w_avg = wavg, w_max = wmax,
+         k = -log((wmax - wavg) / (wmax - wmin)) / (SAL[[r]] - MIN_SAL), G = Gs[[r]])
+})
+qf  <- function(r, s) { a <- PAR[PAR$role == r, ]
+  a$w_max - (a$w_max - a$w_min) * exp(-a$k * (pmax(s, MIN_SAL) - MIN_SAL)) }
+dq  <- function(r, s) { a <- PAR[PAR$role == r, ]
+  a$k * (a$w_max - a$w_min) * exp(-a$k * (pmax(s, MIN_SAL) - MIN_SAL)) }
+
+PAR %>% mutate(M_per_win_flip = 1 / dq(role, SAL[role])) %>% knitr::kable(digits = 3)
+```
+
+```{r optimum}
+BUD <- sum(SAL * SLOTS)
+s_of <- function(r, lam) { a <- PAR[PAR$role == r, ]; top <- a$k * (a$w_max - a$w_min)
+  if (lam >= top) MIN_SAL else MIN_SAL - log(lam / top) / a$k }
+lam <- uniroot(function(L) sum(map_dbl(names(SLOTS), ~ SLOTS[[.x]] * s_of(.x, L))) - BUD,
+               c(1e-9, 500), tol = 1e-12)$root
+opt <- map_dbl(names(SLOTS), ~ s_of(.x, lam)); names(opt) <- names(SLOTS)
+
+tibble(role = names(SLOTS), before = SAL[names(SLOTS)], after = opt,
+       W_before = map2_dbl(names(SLOTS), SAL[names(SLOTS)], ~ qf(.x, .y)) * SLOTS[names(SLOTS)],
+       W_after  = map2_dbl(names(SLOTS), opt, ~ qf(.x, .y)) * SLOTS[names(SLOTS)]) %>%
+  knitr::kable(digits = 2)
+cat(sprintf("staff %.1f -> %.1f wins on an unchanged $%.1fM; margins equal at $%.2fM per flip\n",
+            sum(map2_dbl(names(SLOTS), SAL[names(SLOTS)], ~ qf(.x, .y)) * SLOTS[names(SLOTS)]),
+            sum(map2_dbl(names(SLOTS), opt, ~ qf(.x, .y)) * SLOTS[names(SLOTS)]), BUD, 1 / lam))
+```
+
+## How often the reallocation actually pays
+
+```{r sim}
+SD_RATE <- 0.1314; SIMS <- 200000
+draw <- function(sal) {
+  tot <- numeric(SIMS)
+  for (r in names(SLOTS))
+    tot <- tot + rowSums(matrix(rnorm(SIMS * SLOTS[[r]], qf(r, sal[[r]]),
+                                      SD_RATE * PAR$G[PAR$role == r]),
+                                nrow = SIMS))
+  tot
+}
+d <- draw(as.list(opt)) - draw(as.list(SAL[names(SLOTS)]))
+cat(sprintf("gain: mean %+.1f wins, 80%% interval %+.1f to %+.1f, win-positive %.1f%%\n",
+            mean(d), quantile(d, .10), quantile(d, .90), 100 * mean(d > 0)))
+for (y in 1:5) {
+  cum <- rowSums(replicate(y, draw(as.list(opt)) - draw(as.list(SAL[names(SLOTS)]))))
+  cat(sprintf("  %d season(s): cumulative %+.1f, win-positive %.1f%%\n",
+              y, mean(cum), 100 * mean(cum > 0)))
+}
+```
+
+The mean gain accumulates linearly while its dispersion grows with the square root of
+seasons, so repeating the policy raises the odds at no cost to expected wins per season.

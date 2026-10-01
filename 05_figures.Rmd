@@ -1,0 +1,85 @@
+---
+title: "05 -- The three abstract figures"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.path = "../figures/")
+library(tidyverse); library(plotly); library(patchwork)
+DATA <- "../data"; GAMMA <- 1.83; UR <- 0.31
+wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
+stints  <- read_csv(file.path(DATA, "pitcher_stints_full.csv"),  show_col_types = FALSE)
+seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
+FSTAR26 <- seasons %>% filter(season == 2026) %>% pull(FSTAR) %>% first()
+ROLE_C <- c(Starter = "#2E6FB7", Relief = "#E8A33D", Closer = "#2E9E6B")
+```
+
+The abstract figures in the repository were produced by `scripts/bare_figs.py`, which uses
+matplotlib's 3-D surfaces. R equivalents are given here: `plotly` for the two surfaces and
+`ggplot2` for the gradient panel. The matplotlib versions remain canonical for the PDF,
+because they are what the typeset abstract includes.
+
+## Panel A -- the FIP_Pyth_WL output surface
+
+```{r panelA}
+d <- stints %>% filter(season == 2026, !is.na(FIP), IP >= 20) %>%
+  mutate(G_opp = IP / 9, wr = wp(FIP, FSTAR26), fw = G_opp * wr)
+
+ipg <- seq(15, 200, length.out = 80); fpg <- seq(1.0, 6.8, length.out = 80)
+grid <- outer(ipg, fpg, function(i, f) (i / 9) * wp(f, FSTAR26))
+grid[grid > 13] <- NA
+
+plot_ly() %>%
+  add_surface(x = ipg, y = fpg, z = t(grid), opacity = 0.55, colorscale = "Viridis",
+              colorbar = list(title = "FIP-W")) %>%
+  add_markers(data = d, x = ~IP, y = ~FIP, z = ~fw, color = ~role, colors = ROLE_C,
+              marker = list(size = 3)) %>%
+  layout(scene = list(xaxis = list(title = "Innings pitched (opportunity)"),
+                      yaxis = list(title = "FIP (quality)"),
+                      zaxis = list(title = "FIP-W (wins produced)")))
+```
+
+The dashed break-even ridge in the published figure is the plane FIP = F*, where a pitcher
+is exactly .500.
+
+## Panel B -- staff output per dollar across roles
+
+```{r panelB}
+PAR <- read_csv(file.path(DATA, "repr_params_full.csv"), show_col_types = FALSE)
+MIN_SAL <- 0.78
+SAL <- c(Starter = 6.80, Relief = 1.60, Closer = 8.00); SLOTS <- c(Starter = 5, Relief = 7, Closer = 1)
+qf <- function(r, s) { a <- PAR %>% filter(role == r)
+  a$w_max - (a$w_max - a$w_min) * exp(-a$k * (pmax(s, MIN_SAL) - MIN_SAL)) }
+BUD <- sum(SAL * SLOTS)
+staff <- function(rt, ct) {
+  st <- BUD - rt - ct
+  ifelse(st < 5 * MIN_SAL | rt < 7 * MIN_SAL | ct < MIN_SAL, NA,
+         5 * qf("Starter", st / 5) + 7 * qf("Relief", rt / 7) + qf("Closer", ct))
+}
+rg <- seq(7 * MIN_SAL, 36, length.out = 90); cg <- seq(MIN_SAL, 15, length.out = 90)
+z <- outer(rg, cg, Vectorize(staff))
+plot_ly(x = rg, y = cg, z = t(z)) %>% add_surface(colorscale = "Viridis", opacity = 0.65) %>%
+  layout(scene = list(xaxis = list(title = "Bullpen $M"),
+                      yaxis = list(title = "Closer $M"),
+                      zaxis = list(title = "Staff FIP-W")))
+```
+
+## Figure 2 -- what a dollar buys, and the price of a win-flip
+
+```{r fig2, fig.width=9, fig.height=3}
+sal <- seq(MIN_SAL, 11, length.out = 400)
+dq <- function(r, s) { a <- PAR %>% filter(role == r)
+  a$k * (a$w_max - a$w_min) * exp(-a$k * (pmax(s, MIN_SAL) - MIN_SAL)) }
+g <- expand_grid(role = PAR$role, s = sal) %>% rowwise() %>%
+  mutate(w = qf(role, s), flip = 1 / dq(role, s)) %>% ungroup()
+
+p1 <- ggplot(g, aes(s, w, colour = role)) + geom_line(linewidth = 1) +
+  labs(x = "Salary per roster place ($M)", y = "FIP-W the place produces") +
+  theme_minimal(base_size = 9) + theme(legend.position = "bottom")
+p2 <- ggplot(filter(g, flip <= 13), aes(s, flip, colour = role)) + geom_line(linewidth = 1) +
+  geom_hline(yintercept = 3.56, linetype = "dashed") +
+  labs(x = "Salary per roster place ($M)", y = "$M per win-flip") +
+  theme_minimal(base_size = 9) + theme(legend.position = "bottom")
+p1 + p2
+```

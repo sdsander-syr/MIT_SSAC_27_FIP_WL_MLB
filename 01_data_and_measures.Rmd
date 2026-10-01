@@ -1,0 +1,133 @@
+---
+title: "01 -- Data and the two measures"
+subtitle: "FIP_Pyth_WinRate and FIP_Pyth_WL"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+DATA <- "../data"
+OUT  <- "../data"
+```
+
+## Constants
+
+`GAMMA` is the Pythagorean exponent, `UR` the league unearned-run rate. Both are fixed
+across every script so that nothing downstream can silently re-anchor the measure.
+
+```{r constants}
+GAMMA <- 1.83
+UR    <- 0.31
+```
+
+## Reading the Baseball-Reference exports
+
+One row per pitcher-team stint. Pitchers who changed teams also get a season-total row
+whose `Team` reads `2TM`, `3TM` and so on; those rows are the season totals and are kept
+separately from the per-team stints.
+
+```{r read}
+read_season <- function(file, season) {
+  readr::read_csv(file.path(DATA, file), show_col_types = FALSE) %>%
+    rename(pid = `Player-additional`, name = Player, team = Team, lg = Lg) %>%
+    mutate(name   = str_remove_all(name, "[*#]") %>% str_trim(),
+           season = season,
+           multi  = str_detect(team, "^\\d+TM$"))
+}
+
+raw <- bind_rows(
+  read_season("pitching_2023.txt",               2023),
+  read_season("Pitching_2024.txt",               2024),
+  read_season("Pitching_2025.txt",               2025),
+  read_season("Pitching_2026_through_sept_1.txt", 2026))
+```
+
+### Innings are base-three
+
+`183.2` means 183 and two-thirds, not 183.2. Reading it as a decimal understates league
+innings by tens of frames and is the single most common parsing error in this data.
+
+```{r innings}
+ip_true <- function(x) { w <- floor(x + 1e-9); w + round((x - w) * 10) / 3 }
+raw <- raw %>% mutate(IP = ip_true(IP), G_opp = IP / 9)
+```
+
+## The win-neutral anchor
+
+League-average FIP does **not** calibrate. The win function is convex above an inflection
+near FIP 1.72, so by Jensen's inequality the innings-weighted mean of the mapped win rates
+exceeds .500 even when the mean FIP is league average. We therefore solve for the anchor
+`F*` at which the population does balance.
+
+```{r anchor}
+wp <- function(x, ref) {
+  num <- (ref + UR)^GAMMA
+  num / (num + pmax(x + UR, 1e-6)^GAMMA)
+}
+
+season_totals <- raw %>%
+  group_by(season, pid) %>%
+  slice(if (any(multi)) which(multi)[1] else 1) %>%
+  ungroup() %>%
+  filter(!is.na(FIP), !is.na(ERA), IP > 0)
+
+anchors <- season_totals %>%
+  group_by(season) %>%
+  summarise(
+    lg_FIP = weighted.mean(FIP, IP),
+    lg_ERA = weighted.mean(ERA, IP),
+    FSTAR  = uniroot(function(r) sum(G_opp * wp(FIP, r)) / sum(G_opp) - 0.5,
+                     c(0.5, 15), tol = 1e-12)$root,
+    ESTAR  = uniroot(function(r) sum(G_opp * wp(ERA, r)) / sum(G_opp) - 0.5,
+                     c(0.5, 15), tol = 1e-12)$root,
+    naive  = sum(G_opp * wp(FIP, lg_FIP)) / sum(G_opp),
+    .groups = "drop") %>%
+  mutate(jensen_thousandths = 1000 * (naive - 0.5))
+knitr::kable(anchors, digits = 4)
+```
+
+`jensen_thousandths` is how far league anchoring misses .500. It runs 11--14 thousandths
+on every population, an order of magnitude larger than the same calculation on club
+aggregates, because the correction bites where the dispersion is -- across individual
+pitchers.
+
+## The two measures
+
+```{r measures}
+season_totals <- season_totals %>%
+  left_join(anchors %>% select(season, FSTAR, ESTAR), by = "season") %>%
+  mutate(fip_rate   = wp(FIP, FSTAR),     # FIP_Pyth_WinRate
+         era_rate   = wp(ERA, ESTAR),     # the ERA-anchored comparison
+         wedge_rate = era_rate - fip_rate,
+         fip_W      = G_opp * fip_rate,   # FIP_Pyth_WL, win side
+         fip_L      = G_opp - fip_W)      # FIP_Pyth_WL, loss side
+```
+
+`fip_W + fip_L = G_opp` by construction, so a pitcher's record always spans exactly the
+opportunities he took.
+
+## Roles, from actual appearance counts
+
+```{r roles}
+stints <- raw %>%
+  filter(!multi, !is.na(FIP), IP > 0) %>%
+  left_join(anchors %>% select(season, FSTAR), by = "season") %>%
+  mutate(role = case_when(SV >= 8                 ~ "Closer",
+                          G > 0 & GS / G >= 0.60  ~ "Starter",
+                          TRUE                    ~ "Relief"),
+         fip_rate = wp(FIP, FSTAR),
+         fip_W    = G_opp * fip_rate,
+         fip_L    = G_opp - fip_W)
+
+stints %>% filter(season == 2026) %>%
+  group_by(role) %>%
+  summarise(n = n(), IP = sum(IP), FIP = weighted.mean(FIP, IP),
+            win_rate = sum(fip_W) / sum(G_opp), .groups = "drop") %>%
+  knitr::kable(digits = 3)
+```
+
+```{r save}
+write_csv(season_totals, file.path(OUT, "pitcher_seasons_full.csv"))
+write_csv(stints,        file.path(OUT, "pitcher_stints_full.csv"))
+```
