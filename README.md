@@ -10,25 +10,32 @@ Shane S. Sanders, Falk College of Sport, Syracuse University.
 
 ## What is here
 
+Every file sits at the repository root. Clone it, open it in R, and run; there are no
+paths to adjust.
+
 ```
-abstract/   the typeset abstract and the three figures it includes
-analysis/   the full analysis as R Markdown, 01 through 05
-data/       raw Baseball-Reference exports, Spotrac salaries, derived CSVs
-figures/    output directory for figures rendered from the Rmd
-scripts/    bare_figs.py, which produced the published matplotlib figures
+SSAC27_abstract.tex / .pdf     the abstract
+absfig1 (2).pdf                Figure 1, left panel
+absfig3 (2).pdf                Figure 1, right panel
+fig_marginal_sm (1).png        Figure 2
+01_...Rmd through 05_...Rmd    the analysis, in order
+pitching_2023.txt ... 2026     Baseball-Reference player exports
+bbref_2026_teams.csv           2026 club pitching and standings
+salaries_2026.csv / .xlsx      Spotrac contracts
+repr_params_full.csv           fitted salary-quality gradients (also written by 04)
+bare_figs.py                   produced the published matplotlib figures
 ```
 
 ## Rebuilding the abstract
 
 ```
-cd abstract
 pdflatex SSAC27_abstract.tex
 pdflatex SSAC27_abstract.tex      # twice, for the figure references
 ```
 
-Needs `graphicx`, `caption`, `amsmath`, `float`, `geometry`. The three figure files must
-sit beside the `.tex`; their names contain spaces and parentheses, which LaTeX handles but
-which some build systems do not, so keep them exactly as given.
+Needs `graphicx`, `caption`, `amsmath`, `float`, `geometry`. The three figure files sit beside the
+`.tex` already. Their names contain spaces and parentheses, which LaTeX handles but some
+build systems do not, so keep them exactly as given.
 
 ## Running the analysis
 
@@ -46,8 +53,12 @@ Packages: `tidyverse`, `readxl`, `glmnet`, `ranger`, `gbm`, `plotly`, `patchwork
 
 ```r
 install.packages(c("tidyverse","readxl","glmnet","ranger","gbm","plotly","patchwork","knitr"))
-rmarkdown::render("analysis/01_data_and_measures.Rmd")
+for (f in sort(list.files(pattern = "^0[1-5].*\\.Rmd$"))) rmarkdown::render(f)
 ```
+
+Order matters. `01` writes `pitcher_seasons_full.csv` and `pitcher_stints_full.csv`, which
+`02`, `03`, `04` and `05` all read. `04` writes `repr_params_full.csv`, which `05` and
+`bare_figs.py` read; a copy is committed so `05` runs even before `04` has been knitted.
 
 ## Data
 

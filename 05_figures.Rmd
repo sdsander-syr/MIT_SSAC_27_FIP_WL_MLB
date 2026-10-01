@@ -5,9 +5,10 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
-                      fig.path = "../figures/")
+                      fig.path = "figures/")
+dir.create("figures", showWarnings = FALSE)
 library(tidyverse); library(plotly); library(patchwork)
-DATA <- "../data"; GAMMA <- 1.83; UR <- 0.31
+DATA <- "."; GAMMA <- 1.83; UR <- 0.31
 wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
 stints  <- read_csv(file.path(DATA, "pitcher_stints_full.csv"),  show_col_types = FALSE)
 seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)

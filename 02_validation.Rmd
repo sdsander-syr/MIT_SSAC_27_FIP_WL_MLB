@@ -6,7 +6,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse)
-DATA <- "../data"
+DATA <- "."
 GAMMA <- 1.83; UR <- 0.31
 wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
 ip_true <- function(x) { w <- floor(x + 1e-9); w + round((x - w) * 10) / 3 }

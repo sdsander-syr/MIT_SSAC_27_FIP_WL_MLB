@@ -32,7 +32,7 @@ def wp(f, ref=FS):
 
 
 # ---------------- panel A: the win surface, no titles ------------------------
-st = pd.read_csv("../data/pitcher_stints_full.csv")
+st = pd.read_csv("pitcher_stints_full.csv")
 st = st[(st.season == 2026) & st.FIP.notna() & (st.IP >= 20)].copy()
 st["g"] = st.IP / 9
 st["wr"] = wp(st.FIP.values)
@@ -83,7 +83,7 @@ fig.suptitle("The FIP_WL output surface as a function of Pitcher Innings and FIP
 fig.savefig("absfig1.pdf"); fig.savefig("absfig1.png", dpi=220); plt.close(fig)
 
 # ---------------- panel B: the reallocation surface, no titles ---------------
-P = pd.read_csv("../data/repr_params_full.csv", index_col=0)
+P = pd.read_csv("repr_params_full.csv", index_col=0)
 MIN_SAL = 0.78
 SAL = {"Starter": 6.80, "Relief": 1.60, "Closer": 8.00}
 SLOTS = {"Starter": 5, "Relief": 7, "Closer": 1}

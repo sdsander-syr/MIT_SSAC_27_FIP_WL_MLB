@@ -6,7 +6,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse); library(glmnet); library(ranger); library(gbm)
-DATA <- "../data"; set.seed(20260901)
+DATA <- "."; set.seed(20260901)
 seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
 MINIP <- 40
 ```

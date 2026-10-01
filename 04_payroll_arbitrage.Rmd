@@ -6,7 +6,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse); library(readxl)
-DATA <- "../data"; set.seed(20260901)
+DATA <- "."; set.seed(20260901)
 GAMMA <- 1.83; UR <- 0.31; MIN_SAL <- 0.78
 wp <- function(x, ref) { num <- (ref + UR)^GAMMA; num / (num + pmax(x + UR, 1e-6)^GAMMA) }
 seasons <- read_csv(file.path(DATA, "pitcher_seasons_full.csv"), show_col_types = FALSE)
@@ -130,6 +130,9 @@ dq  <- function(r, s) { a <- PAR[PAR$role == r, ]
   a$k * (a$w_max - a$w_min) * exp(-a$k * (pmax(s, MIN_SAL) - MIN_SAL)) }
 
 PAR %>% mutate(M_per_win_flip = 1 / dq(role, SAL[role])) %>% knitr::kable(digits = 3)
+
+# 05_figures.Rmd and scripts/bare_figs.py both read this file
+write_csv(PAR, file.path(DATA, "repr_params_full.csv"))
 ```
 
 ```{r optimum}
