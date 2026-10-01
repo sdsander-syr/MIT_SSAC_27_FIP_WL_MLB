@@ -19,7 +19,23 @@ import matplotlib.patheffects as pe
 
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10,
                      "xtick.labelsize": 8.5, "ytick.labelsize": 8.5})
-UR, GAM, FS = 0.31, 1.83, 4.0385
+UR, GAM = 0.31, 1.83
+
+def _solve_fstar(path="pitcher_seasons_full.csv", season=2026):
+    """Win-neutral anchor, solved from the data rather than hardcoded, so this
+    script and the Rmd pipeline can never drift apart."""
+    from scipy.optimize import brentq
+    t = pd.read_csv(path)
+    t = t[(t.season == season) & t.FIP.notna() & (t.IP > 0)]
+    g = t.IP / 9
+
+    def f(ref):
+        n = (ref + UR) ** GAM
+        return float((g * (n / (n + np.maximum(t.FIP.values + UR, 1e-6) ** GAM))).sum()
+                     / g.sum() - 0.5)
+    return brentq(f, 0.5, 15, xtol=1e-12)
+
+FS = _solve_fstar()
 ROLE_C = {"Starter": "#2E6FB7", "Relief": "#E8A33D", "Closer": "#2E9E6B"}
 PANEL, ELEV, AZIM = (6.4, 4.6), 25, -60
 BOXASP = (1.10, 0.95, 0.80)

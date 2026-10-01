@@ -127,6 +127,50 @@ stints %>% filter(season == 2026) %>%
   knitr::kable(digits = 3)
 ```
 
+## What WAR misses: the same value, very different rates
+
+Pitcher WAR is a volume total against a replacement baseline, with no denominator. The
+same 2.0 WAR therefore has to be earned over very different opportunity counts, so a
+reliever must be markedly better *per opportunity* than a starter to arrive at the same
+figure. This is the gap the Introduction quotes, and it is the clearest statement of why a
+volume measure cannot price roles against one another.
+
+```{r war}
+role_of <- stints %>%
+  group_by(season, pid) %>% slice_max(IP, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% select(season, pid, role)
+
+war <- season_totals %>%
+  inner_join(role_of, by = c("season", "pid")) %>%
+  filter(!is.na(WAR), IP > 0)
+
+war_at <- function(target, halfwidth = 0.3) {
+  war %>% filter(between(WAR, target - halfwidth, target + halfwidth)) %>%
+    group_by(role) %>%
+    summarise(n = n(), IP = mean(IP), opportunities = mean(G_opp),
+              FIP = weighted.mean(FIP, IP),
+              win_rate = weighted.mean(fip_rate, IP), .groups = "drop") %>%
+    mutate(WAR = target, .before = 1)
+}
+bind_rows(war_at(2.0), war_at(2.5)) %>% knitr::kable(digits = 3)
+```
+
+```{r warfit}
+# the same thing as a fitted line, so any WAR level can be read off
+war %>% filter(IP >= 40, role %in% c("Starter", "Relief")) %>%
+  group_by(role) %>%
+  group_modify(~ {
+    f <- lm(fip_rate ~ WAR, data = .x)
+    tibble(intercept = coef(f)[1], slope = coef(f)[2], n = nrow(.x),
+           at_2.0 = coef(f)[1] + 2.0 * coef(f)[2],
+           at_2.5 = coef(f)[1] + 2.5 * coef(f)[2])
+  }) %>% knitr::kable(digits = 3)
+```
+
+A starter's win rate barely moves across the WAR range because he accumulates WAR through
+innings; a reliever, with roughly half the opportunities, can only get there by being
+better per opportunity, so his rate climbs about twice as fast.
+
 ```{r save}
 write_csv(season_totals, file.path(OUT, "pitcher_seasons_full.csv"))
 write_csv(stints,        file.path(OUT, "pitcher_stints_full.csv"))
